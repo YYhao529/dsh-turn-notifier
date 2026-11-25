@@ -48,19 +48,19 @@ $hint = '点击卡片回到对话'
 
 # Layout constants. The text column starts after the badge; positions inside the
 # card are fixed so every reminder has exactly the same footprint.
-$padLeft = 24
-$padRight = 26
-$padTop = 20
-$padBottom = 18
-$columnLeft = 90
-$headingGap = 18
-$hintGap = 10
-$costGap = 18
-$costRuleGap = 9
+$padLeft = 20
+$padRight = 22
+$padTop = 16
+$padBottom = 14
+$columnLeft = 80
+$headingGap = 14
+$hintGap = 8
+$costGap = 14
+$costRuleGap = 8
 $costLabelGap = 6
-$width = 640
-$radius = 16
-$badgeSize = 52
+$width = 560
+$radius = 14
+$badgeSize = 46
 
 $sheet = [System.Drawing.Color]::FromArgb(24, 26, 32)
 $line = [System.Drawing.Color]::FromArgb(54, 60, 76)
@@ -157,15 +157,15 @@ $ink.DrawPath((New-Object System.Drawing.Pen($line, 1)), $shape)
 # Round badge with a check mark: emoji glyphs render unreliably here.
 $badgeTop = [int]($headingTop + (($hintTop + $hintSize.Height - $headingTop) - $badgeSize) / 2)
 $ink.FillEllipse((New-Object System.Drawing.SolidBrush($accentSoft)), $padLeft, $badgeTop, $badgeSize, $badgeSize)
-$checkPen = New-Object System.Drawing.Pen($accent, 3.2)
+$checkPen = New-Object System.Drawing.Pen($accent, 2.9)
 $checkPen.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
 $checkPen.EndCap = [System.Drawing.Drawing2D.LineCap]::Round
-$checkX = $padLeft + 15
-$checkY = $badgeTop + 26
+$checkX = $padLeft + 13
+$checkY = $badgeTop + 23
 $ink.DrawLines($checkPen, @(
     (New-Object System.Drawing.PointF $checkX, $checkY),
-    (New-Object System.Drawing.PointF ($checkX + 10), ($checkY + 10)),
-    (New-Object System.Drawing.PointF ($checkX + 23), ($checkY - 9))
+    (New-Object System.Drawing.PointF ($checkX + 9), ($checkY + 9)),
+    (New-Object System.Drawing.PointF ($checkX + 20), ($checkY - 8))
 ))
 
 $headingBrush = New-Object System.Drawing.SolidBrush($headingInk)
