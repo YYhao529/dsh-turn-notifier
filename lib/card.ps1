@@ -39,6 +39,10 @@ if ($skipForeground) {
 $heading = '@@HEADING@@'
 $titleText = '@@TITLE@@'
 $durationText = '@@DURATION@@'
+$turnCost = '@@TURN_COST@@'
+$todayCost = '@@TODAY_COST@@'
+$turnCostLabel = '本次'
+$todayCostLabel = '今日累计'
 $separator = ' · '
 $hint = '点击卡片回到对话'
 
@@ -51,6 +55,9 @@ $padBottom = 18
 $columnLeft = 90
 $headingGap = 18
 $hintGap = 10
+$costGap = 18
+$costRuleGap = 9
+$costLabelGap = 6
 $width = 640
 $radius = 16
 $badgeSize = 52
@@ -117,7 +124,10 @@ $detailHeight = [Math]::Ceiling($lineHeight * 2)
 
 $headingTop = $padTop
 $detailTop = $headingTop + [Math]::Ceiling($headingSize.Height) + $headingGap
-$hintTop = $detailTop + $detailHeight + $hintGap
+# The money row is always present, so the card keeps one fixed footprint whether
+# or not the turn actually cost anything.
+$costTop = $detailTop + $detailHeight + $costGap
+$hintTop = $costTop + [Math]::Ceiling($lineHeight) + $hintGap
 $height = [int]($hintTop + [Math]::Ceiling($hintSize.Height) + $padBottom)
 
 $screen = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
@@ -161,6 +171,7 @@ $ink.DrawLines($checkPen, @(
 $headingBrush = New-Object System.Drawing.SolidBrush($headingInk)
 $detailBrush = New-Object System.Drawing.SolidBrush($detailInk)
 $hintBrush = New-Object System.Drawing.SolidBrush($hintInk)
+$accentBrush = New-Object System.Drawing.SolidBrush($accent)
 
 $ink.DrawString($heading, $headingFont, $headingBrush, $columnLeft, $headingTop)
 
@@ -196,6 +207,32 @@ if ($detailLines -eq 1) {
     $durationInk = $detailInk
     $ink.DrawString($durationWithSeparator, $detailFont, (New-Object System.Drawing.SolidBrush($durationInk)), $durationLeft, ($detailTop + $lineHeight))
 }
+
+# Money row: what this turn cost on the left, what the day cost so far on the
+# right. Both are drawn label-first so the amounts can carry their own colour
+# without breaking the row into measured slices of different ink.
+$ruleInk = [System.Drawing.Color]::FromArgb(44, 49, 62)
+$ink.DrawLine(
+    (New-Object System.Drawing.Pen($ruleInk, 1)),
+    $columnLeft, [int]($costTop - $costRuleGap),
+    ($columnLeft + $textWidth), [int]($costTop - $costRuleGap)
+)
+
+$turnLabelWidth = (Measure-Text $turnCostLabel $detailFont 0).Width
+$turnValueWidth = (Measure-Text $turnCost $detailFont 0).Width
+$ink.DrawString($turnCostLabel, $detailFont, $hintBrush, $columnLeft, $costTop)
+$turnValueLeft = $columnLeft + [Math]::Ceiling($turnLabelWidth) + $costLabelGap
+$ink.DrawString($turnCost, $detailFont, $accentBrush, $turnValueLeft, $costTop)
+
+$todayLabelWidth = (Measure-Text $todayCostLabel $detailFont 0).Width
+$todayValueWidth = (Measure-Text $todayCost $detailFont 0).Width
+$todayRowWidth = [Math]::Ceiling($todayLabelWidth) + $costLabelGap + [Math]::Ceiling($todayValueWidth)
+$todayLeft = $columnLeft + $textWidth - $todayRowWidth
+$ink.DrawString($todayCostLabel, $detailFont, $hintBrush, $todayLeft, $costTop)
+$ink.DrawString(
+    $todayCost, $detailFont, $headingBrush,
+    ($todayLeft + [Math]::Ceiling($todayLabelWidth) + $costLabelGap), $costTop
+)
 
 $ink.DrawString($hint, $hintFont, $hintBrush, $columnLeft, $hintTop)
 

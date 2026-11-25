@@ -1,13 +1,13 @@
 // End-to-end check of the real card path: render lib/card.ps1 exactly like the
 // host does. Two modes:
 //
-//   node dev/card-selftest.mjs [heading] [title] [duration]
+//   node dev/card-selftest.mjs [heading] [title] [duration] [turnCost] [todayCost]
 //       TURN_NOTIFIER_SKIP_FOREGROUND=1 reproduces the production rule (no card
 //       while the Harness window is in front)
 //       show the card and let the card process screenshot itself (capturing the
 //       desktop from a second process proved unreliable here)
 //
-//   node dev/card-selftest.mjs --preview ../preview.png [heading] [title] [duration]
+//   node dev/card-selftest.mjs --preview ../preview.png [heading] [title] [duration] [turnCost] [todayCost]
 //       render the card face straight to a PNG without showing any window
 import { spawn, spawnSync } from 'node:child_process'
 import { readFileSync, writeFileSync } from 'node:fs'
@@ -31,11 +31,15 @@ if (argv[0] === '--preview') {
 const heading = argv[0] || '任务完成'
 const title = argv[1] || '《修 bug 与回归测试》'
 const duration = argv[2] || '用时 2 分 05 秒'
+const turnCost = argv[3] || '¥0.0042'
+const todayCost = argv[4] || '¥1.2836'
 
 let script = readFileSync(cardPath, 'utf8')
   .replace('@@HEADING@@', quote(heading))
   .replace('@@TITLE@@', quote(title))
   .replace('@@DURATION@@', quote(duration))
+  .replace('@@TURN_COST@@', quote(turnCost))
+  .replace('@@TODAY_COST@@', quote(todayCost))
   .replace('@@AUTO_CLOSE_MS@@', '6000')
   .replace('@@SKIP_IF_FOREGROUND@@', process.env.TURN_NOTIFIER_SKIP_FOREGROUND ?? '0')
 

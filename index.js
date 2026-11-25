@@ -8,6 +8,12 @@
  *
  * The card is skipped while the Harness window itself is in the foreground:
  * you are already looking at the answer in that case.
+ *
+ * Next to the turn duration the card reports money: what the turn just cost and
+ * how much today has cost so far. DSH knows token counts but not prices, so the
+ * yuan figures are computed here from the provider-reported token buckets (see
+ * lib/cost.js) and the day total is a ledger this plugin keeps for itself in
+ * `data/usage.json`.
  */
 
 import { spawn } from 'node:child_process'
@@ -15,11 +21,20 @@ import { readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { TurnMeter, formatYuan, fromMicro } from './lib/cost.js'
+import { backfillToday } from './lib/backfill.js'
+import { readLedger, writeLedger } from './lib/ledger.js'
 
 export const name = 'turn-notifier'
 
 const CARD_PATH = fileURLToPath(new URL('./lib/card.ps1', import.meta.url))
+// `TURN_NOTIFIER_LEDGER` exists so the replay and test harnesses in `dev/` can
+// bill a throwaway ledger instead of the machine's real daily total.
+const LEDGER_PATH =
+  process.env.TURN_NOTIFIER_LEDGER || fileURLToPath(new URL('./data/usage.json', import.meta.url))
 const AUTO_CLOSE_MS = 15000
+/** Cost arrives event by event; the ledger is rewritten at most this often. */
+const LEDGER_FLUSH_MS = 4000
 
 const quote = (value) => String(value).replace(/'/g, "''")
 
@@ -42,7 +57,7 @@ const bootstrap = (scriptPath) =>
   `Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue; ` +
   'Invoke-Expression $script'
 
-const showCard = (heading, title, duration) => {
+const showCard = (heading, title, duration, turnCost, todayCost) => {
   if (process.platform !== 'win32') return
   let script
   try {
@@ -50,6 +65,8 @@ const showCard = (heading, title, duration) => {
       .replace('@@HEADING@@', quote(heading))
       .replace('@@TITLE@@', quote(title))
       .replace('@@DURATION@@', quote(duration))
+      .replace('@@TURN_COST@@', quote(turnCost))
+      .replace('@@TODAY_COST@@', quote(todayCost))
       .replace('@@AUTO_CLOSE_MS@@', String(AUTO_CLOSE_MS))
       // Skip the card while the Harness window is in front: the answer is
       // already on screen then, and a corner card would only be in the way.
@@ -87,8 +104,36 @@ const showCard = (heading, title, duration) => {
 }
 
 export function apply(ctx) {
-  const previousRunning = new Map()
-  const startedAt = new Map()
+  const meter = new TurnMeter()
+  meter.seedDays(readLedger(LEDGER_PATH).days)
+  // The startup backfill recomputes today from the session logs, and those logs
+  // already contain whatever the ledger says. Drop today's bucket before the
+  // backfill starts reading so the two cannot be added together; everything the
+  // backfill replays then lands exactly once, deduplicated by (turn, step).
+  const backfill = process.env.TURN_NOTIFIER_BACKFILL !== '0'
+  if (backfill) meter.resetDay()
+
+  let flushTimer
+  const flush = () => {
+    if (flushTimer !== undefined) {
+      clearTimeout(flushTimer)
+      flushTimer = undefined
+    }
+    try {
+      writeLedger(LEDGER_PATH, meter.snapshotDays())
+    } catch (error) {
+      console.warn('[turn-notifier] 保存当日消耗失败：', error)
+    }
+  }
+  const scheduleFlush = () => {
+    if (flushTimer !== undefined) return
+    flushTimer = setTimeout(() => {
+      flushTimer = undefined
+      flush()
+    }, LEDGER_FLUSH_MS)
+    // Never hold the host process open just to rewrite the ledger.
+    flushTimer.unref?.()
+  }
 
   const readRecord = async (sessionId) => {
     const query = ctx.get('sessionQuery')
@@ -104,33 +149,35 @@ export function apply(ctx) {
     }
   }
 
-  const report = async (sessionId, elapsed) => {
+  const report = async (sessionId, elapsed, spentMicro) => {
     const record = await readRecord(sessionId)
     if (record.origin === 'subagent') return
     const raw = typeof record.title === 'string' ? record.title.trim() : ''
     const title = raw ? `《${raw}》` : '任务已结束'
     const duration = `用时 ${formatDuration(elapsed)}`
-    showCard('任务完成', title, duration)
+    const turnCost = formatYuan(fromMicro(spentMicro))
+    const todayCost = formatYuan(fromMicro(meter.todayMicro()))
+    console.log(`[turn-notifier] 本次消耗 ${turnCost}，今日累计 ${todayCost}`)
+    showCard('任务完成', title, duration, turnCost, todayCost)
+    // A finished turn is the natural checkpoint: persist now so the daily total
+    // survives a crash instead of waiting for the debounced rewrite.
+    flush()
   }
 
   const observe = (sessionId, running) => {
-    const previous = previousRunning.get(sessionId)
-    previousRunning.set(sessionId, running === true)
     if (running === true) {
-      if (previous !== true) startedAt.set(sessionId, Date.now())
+      meter.start(sessionId)
       return
     }
-    if (previous !== true) return
-    const started = startedAt.get(sessionId)
-    startedAt.delete(sessionId)
-    const elapsed = typeof started === 'number' ? Date.now() - started : 0
-    report(sessionId, elapsed).catch((error) => {
+    const finished = meter.finish(sessionId)
+    if (!finished) return
+    report(sessionId, finished.elapsedMs, finished.spentMicro).catch((error) => {
       console.warn('[turn-notifier] 生成提醒失败：', error)
     })
   }
 
   ctx.effect(() => {
-    const off = ctx.on('api-session/status', (sessionId, running) => {
+    const offStatus = ctx.on('api-session/status', (sessionId, running) => {
       try {
         observe(sessionId, running)
       } catch (error) {
@@ -138,12 +185,57 @@ export function apply(ctx) {
       }
     })
 
+    // Durable session events carry the token usage of every model request,
+    // including the ones a subagent makes: they are billed too, and only the
+    // card itself is limited to the sessions the user talks to.
+    const offEvent = ctx.on('session/event', (session, event) => {
+      try {
+        const sessionId = session?.id
+        if (typeof sessionId !== 'string' || sessionId.length === 0) return
+        if (meter.ingest(sessionId, event)) scheduleFlush()
+      } catch (error) {
+        console.warn('[turn-notifier] 计费失败：', error)
+      }
+    })
+
+    const offDisposed = ctx.on('session/disposed', (session) => {
+      const sessionId = session?.id
+      if (typeof sessionId === 'string') meter.forget(sessionId)
+    })
+
     console.log('[turn-notifier] 任务完成提醒已启用')
 
+    // Re-bill the logs already written today so the first card after a restart
+    // shows a real daily total rather than only what this process has seen.
+    // Set `TURN_NOTIFIER_BACKFILL=0` to skip it (the replay harness does).
+    if (process.env.TURN_NOTIFIER_BACKFILL !== '0') {
+      void backfillToday({
+        now: Date.now(),
+        ingest: (sessionId, event) => {
+          if (meter.ingest(sessionId, event)) scheduleFlush()
+        },
+        onError: (path, error) => {
+          console.warn('[turn-notifier] 读取历史会话失败：', path, error?.message ?? error)
+        },
+      })
+        .then(({ logs, events }) => {
+          if (events === 0) return
+          flush()
+          console.log(
+            `[turn-notifier] 补记今日已发生的消耗：${formatYuan(fromMicro(meter.todayMicro()))}` +
+              `（${logs} 个日志 / ${events} 条事件）`,
+          )
+        })
+        .catch((error) => {
+          console.warn('[turn-notifier] 补记今日消耗失败：', error)
+        })
+    }
+
     return () => {
-      off?.()
-      previousRunning.clear()
-      startedAt.clear()
+      offStatus?.()
+      offEvent?.()
+      offDisposed?.()
+      flush()
       console.log('[turn-notifier] 任务完成提醒已停用')
     }
   }, 'turn-notifier: session watcher')
